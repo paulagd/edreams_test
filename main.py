@@ -8,24 +8,75 @@ from datetime import datetime
 import numpy as np
 import os
 import torch.nn as nn
-from tqdm import tqdm, trange
+from tqdm import trange
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import f1_score, precision_score, recall_score
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from dataset import eDreamsDataset
 from nn_model import NeuralNetwork
-from utils import mean_encoding
+from utils import mean_encoding, create_tripDuration
 
 
 CATEGORICAL_FEATURES = ['WEBSITE', 'HAUL_TYPE', 'DEVICE', 'TRIP_TYPE', 'PRODUCT']
 
 
+def preprocess_data(dataset_train, dataset_test, args):
+    df = pd.read_csv(dataset_train, sep=';', engine='python')
+    df_test = pd.read_csv(dataset_test, sep=';', engine='python')
+
+    ##########################################################################################
+    # IDEA: I substitute ARRIVAL AND DEPARTURE DATES BY TRIP_DURATION, WHICH I THINK IS MORE RELEVANT
+    df = create_tripDuration(df, 'training set')
+    df_test = create_tripDuration(df_test, 'test set')
+    ##########################################################################################
+    # IDEA: I convert the distance in integer as well
+    df['DISTANCE'] = df['DISTANCE'].str.replace(',', '').astype(int)
+    df_test['DISTANCE'] = df_test['DISTANCE'].str.replace(',', '').astype(int)
+    # IDEA: I fill nan values of DEVICE feature as 'OTHER' options
+    df = df.fillna(value={'DEVICE': 'OTHER'})
+    df_test = df_test.fillna(value={'DEVICE': 'OTHER'})
+    ##########################################################################################
+    # IDEA: set categorical variables in pandas for ML model
+    if not args.DL:
+        for col in ['WEBSITE', 'HAUL_TYPE', 'DEVICE', 'TRIP_TYPE', 'PRODUCT']:
+            df[col] = df[col].astype('category')
+            df_test[col] = df_test[col].astype('category')
+
+    # DIVIDE DATA INTO TRAIN / VAL  --> DATA/LABELS
+    train_df, val_df = train_test_split(df, test_size=0.2)
+    if args.DL:
+        # MEAN ENCODING FOR CATEGORICAL VARIABLES
+        # With train encoding parameters --> apply to validation and test set
+        for col in ['WEBSITE', 'HAUL_TYPE', 'DEVICE', 'TRIP_TYPE', 'PRODUCT']:
+            column_dict, train_df = mean_encoding(train_df, col)
+            # SUBSTITUTE IN VAL SET
+            _, val_df = mean_encoding(val_df, col, column_dict)
+            val_df[col].fillna((train_df[col].mean()), inplace=True)
+            # SUBSTITUTE IN TEST SET
+            _, df_test = mean_encoding(df_test, col, column_dict)
+            df_test[col].fillna((train_df[col].mean()), inplace=True)
+
+        train_df = train_df.astype(float)
+        assert val_df.isnull().values.any() == False, 'There are NaN values in validation set'
+        val_df = val_df.astype(float)
+        df_test = df_test.astype(float)
+
+    y_train = train_df['EXTRA_BAGGAGE']
+    X_train = train_df.drop('EXTRA_BAGGAGE', 1)
+    y_val = val_df['EXTRA_BAGGAGE']
+    X_val = val_df.drop('EXTRA_BAGGAGE', 1)
+
+    return X_train, y_train, X_val, y_val, df_test
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--DL", action="store_true", default=False, help="Enables deep learning training model.")
+    parser.add_argument("--save_chkp", action="store_true", default=False, help="Enables deep learning training model.")
     # parser.add_argument("--learn_features", action="store_false", default=True, help="Enables learning features from emb")
     parser.add_argument('--epochs', type=int, default=300, help="Number of epochs on training.")
     parser.add_argument('--lr', type=float, default=0.001, help="Learning rate parameter.")
@@ -43,10 +94,15 @@ def evaluation(labels, preds):
     return f1, p, r
 
 
-def deep_learning_pipeline(X_train, y_train, X_val, y_val, args):
+def DL_pipeline(X_train, y_train, X_val, y_val, X_test, args):
+    '''
+    Deep Learning pipeline of training-evaluation procedure
+    '''
     # Generators
-    train_set = eDreamsDataset(X_train.values, y_train.values)
-    val_set = eDreamsDataset(X_val.values, y_val.values)
+    scaler = MinMaxScaler()
+
+    train_set = eDreamsDataset(scaler.fit_transform(X_train.values), y_train.values)
+    val_set = eDreamsDataset(scaler.fit_transform(X_val.values), y_val.values)
     
     train_loader = DataLoader(train_set, batch_size=args.bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=args.bs, shuffle=False, num_workers=0)
@@ -59,76 +115,92 @@ def deep_learning_pipeline(X_train, y_train, X_val, y_val, args):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     # optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCELoss()
     # criterion = nn.MSELoss()
 
     global_step = 0
+    early_stopping = 0
+    last_val_loss = np.inf
     for j in trange(args.epochs, desc='Training NeuralNetwork...'):
-
+        av_loss = []
         for i, (x, y) in enumerate(train_loader):
-
+            model.train()
             x = x.to(device)
             y = y.to(device)
-            
-            model.train()
+
             optimizer.zero_grad()
             y_pred = model(x)
             
             # CALCULATE LOSS
-            embed()
             # np.unique(y_pred.detach())
-            loss = criterion(y_pred, y)
-            # loss = criterion(pred, y.view(batch_size * seq_length).long())
-            loss_value = loss.item()
-
+            loss = criterion(y_pred, y.type(torch.FloatTensor))
+            av_loss.append(loss.item())
             # BACKWARD PASS
             loss.backward()
             # MINIMIZE LOSS
             optimizer.step()
             global_step += 1
-            writer.add_scalar('loss/train', loss_value, global_step)
-            print('[Training epoch {}: {}/{}] Loss: {}'.format(j, i, len(train_loader), loss_value))
+
+        writer.add_scalar('loss/train', np.mean(av_loss), global_step)
+        print('[Training epoch {}/{}]: Loss = {}'.format(j, args.epochs, np.mean(av_loss)))
 
         if j % 10:
             #  EVALUATION EVERY 10 EPOCHS
             val_loss = []
             labels_arr = []
             preds_arr = []
-            for (x, y) in enumerate(val_loader):
-
+            for i_val, (x, y) in enumerate(val_loader):
                 model.eval()
-
                 x = x.to(device)
                 y = y.to(device)
 
                 y_pred = model(x)
-
                 # CALCULATE LOSS
-                loss = criterion(y_pred, y)
-                # loss = criterion(pred, y.view(batch_size * seq_length).long())
-                # val_loss.append(loss.cpu().detach().numpy())
+                loss = criterion(y_pred, y.type(torch.FloatTensor))
+                # APPEND LABELS AND PREDICTIONS FOR EVALUATIONS
                 labels_arr.append(y)
-                preds_arr.append(y_pred)
+                preds_arr.append(y_pred.detach().numpy().squeeze())
                 val_loss.append(loss.item())
 
             writer.add_scalar('loss/val', np.mean(val_loss), j)
             # EVALUATION
-            f1, p, r = evaluation(labels_arr, preds_arr)
+            f1 = f1_score(np.hstack(labels_arr), np.round(np.hstack(preds_arr)), average="binary")
+            # f1, p, r = evaluation(labels_arr, preds_arr)
             
+            # print('[Validation epoch {}]: Loss = {} | '.format(j, np.mean(val_loss)))
             print('[Validation epoch {}] Loss: {} | f1 = {}'.format(j, np.mean(val_loss), f1))
 
-            writer.add_text('evaluation/f1_score', f1, j)
-            writer.add_text('evaluation/precision', p, j)
-            writer.add_text('evaluation/recall', r, j)
+            writer.add_scalar('evaluation/f1_score', f1, j)
+            # writer.add_scalar('evaluation/precision', p, j)
+            # writer.add_scalar('evaluation/recall', r, j)
+            
+            # IDEA: EARLY STOPPING
+            if np.mean(val_loss) > last_val_loss:
+                if early_stopping > 30:
+                    break
+                early_stopping += 1
+            else:
+                early_stopping = 0
 
-        checkpoint = {
-            "state_dict": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-        }
+            last_val_loss = np.mean(val_loss)
+            
+            if args.save_chkp:
+                checkpoint = {
+                    "state_dict": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                }
 
-        os.makedirs("weights/{}".format(date), exist_ok=True)
-        torch.save(checkpoint, "weights/{}/checkpoint_{}.pt".format(date, j))
+                os.makedirs("weights/{}".format(date), exist_ok=True)
+                torch.save(checkpoint, "weights/{}/checkpoint_{}.pt".format(date, j))
+
+    return model
         
+
+def ML_pipeline(X_train, y_train, X_val, y_val, X_test, args):
+    '''
+    Machine Learning pipeline of training-evaluation procedure
+    '''
+
 
 if __name__ == '__main__':
 
@@ -138,8 +210,6 @@ if __name__ == '__main__':
     date = datetime.now().strftime('%y%m%d%H%M%S')
     if args.DL:
         writer = SummaryWriter(log_dir=f'logs/logs_{date}/')
-    else:
-        writer = SummaryWriter(log_dir=f'logs/nologs/logs/')
 
     if torch.cuda.is_available() and args.device:
         torch.cuda.manual_seed_all(args.seed)
@@ -150,13 +220,19 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     device = torch.device(device)
 
-    X_train, y_train, X_val, y_val, X = preprocess_data('/Users/paulagomezduran/Desktop/EDREAMS/train.csv', True, args)
-    # df_test = filter_data('/Users/paulagomezduran/Desktop/EDREAMS/test.csv', False)
+    main_path = '/Users/paulagomezduran/Desktop/EDREAMS/'
+
+    X_train, y_train, X_val, y_val, X_test = preprocess_data(os.path.join(main_path, 'train.csv'),
+                                                             os.path.join(main_path, 'test.csv'), args)
 
     if args.DL:
-        deep_learning_pipeline(X_train, y_train, X_val, y_val, args)
+        model = DL_pipeline(X_train, y_train, X_val, y_val, X_test, args)
+        embed()
+    else:
+        ML_pipeline(X_train, y_train, X_val, y_val, X_test, args)
 
 
+    
     #######################################################################################################
     # CREATE A MODEL
     # embed()

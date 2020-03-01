@@ -21,4 +21,6 @@ class NeuralNetwork(torch.nn.Module):
 
         x = F.relu(self.input(x))
         x = F.relu(self.hidden(x))
-        return torch.sigmoid(self.out(x))
+        x = self.out(x)
+        return torch.sigmoid(x)
+        # return F.softmax(x)

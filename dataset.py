@@ -15,6 +15,7 @@ class eDreamsDataset(Dataset):
         return len(self.labels)
 
     def __getitem__(self, idx):
+
         return torch.Tensor(self.data[idx]), torch.from_numpy(np.asarray(self.labels[idx])).type(torch.LongTensor)
 
 
