@@ -11,7 +11,6 @@ class eDreamsDataset(Dataset):
         self.labels = labels
 
     def __len__(self):
-        # return len(self.labels) - self.max_len-1
         return len(self.labels)
 
     def __getitem__(self, idx):

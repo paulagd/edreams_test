@@ -12,7 +12,8 @@ class NeuralNetwork(torch.nn.Module):
         # super function. It inherits from nn.Module and we can access everythink in nn.Module
         super(NeuralNetwork, self).__init__()
         # Linear function.
-        # self.embedding = nn.
+        # self.embedding = nn.Embedding(input_dim, 64)
+        self.dropout = dropout
         self.input = nn.Linear(input_dim, input_dim*2)
         self.hidden = nn.Linear(input_dim*2, input_dim)
         self.out = nn.Linear(input_dim, output_dim)
@@ -20,7 +21,8 @@ class NeuralNetwork(torch.nn.Module):
     def forward(self, x):
 
         x = F.relu(self.input(x))
+        x = F.dropout(x, p=self.dropout)
         x = F.relu(self.hidden(x))
+        x = F.dropout(x, p=self.dropout)
         x = self.out(x)
         return torch.sigmoid(x)
-        # return F.softmax(x)
