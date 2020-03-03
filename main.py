@@ -29,7 +29,8 @@ def parse_args():
     parser.add_argument("--DL", action="store_true", default=False, help="Enables deep learning training model.")
     parser.add_argument("--save_chkp", action="store_true", default=False, help="Enables weights to be saved.")
     parser.add_argument("--mean_encoding", action="store_true", default=False, help="Enables mean encoding (by default with DL).")
-    parser.add_argument("--optimize", action="store_true", default=False, help="Enables mean encoding (by default with DL).")
+    parser.add_argument("--balanceDATA", action="store_false", default=True, help="Disables balancing classes.")
+    parser.add_argument("--optimize", action="store_true", default=False, help="Enables optimization of ML algorithm.")
     # parser.add_argument("--learn_features", action="store_false", default=True, help="Enables learning features from emb")
     parser.add_argument('--epochs', type=int, default=300, help="Number of epochs on training.")
     parser.add_argument('--lr', type=float, default=0.001, help="Learning rate parameter.")
@@ -43,7 +44,6 @@ def DL_pipeline(x_train, y_train, x_val, y_val, args):
     '''
     Deep Learning pipeline of training-evaluation procedure
     '''
-
 
     train_set = eDreamsDataset(x_train, y_train)
     val_set = eDreamsDataset(x_val, y_val)
@@ -89,7 +89,7 @@ def DL_pipeline(x_train, y_train, x_val, y_val, args):
 
         writer.add_scalar('train/loss', np.mean(av_loss), global_step)
 
-        f1_train = f1_score(np.hstack(labels_train), np.round(np.hstack(preds_train)))
+        f1_train = f1_score(np.hstack(labels_train), np.round(np.hstack(preds_train)), average='weighted')
         writer.add_scalar('train/f1_score', f1_train, j)
 
         if j % 10 == 0:
@@ -112,16 +112,12 @@ def DL_pipeline(x_train, y_train, x_val, y_val, args):
 
             writer.add_scalar('val/loss', np.mean(val_loss), j)
             # EVALUATION
-            # f1 = f1_score(np.hstack(labels_arr), np.round(np.hstack(preds_arr)), average='weighted')
-            f1 = f1_score(np.hstack(labels_arr), np.round(np.hstack(preds_arr)))
-            # f1, p, r = evaluation(labels_arr, preds_arr)
-
+            f1 = f1_score(np.hstack(labels_arr), np.round(np.hstack(preds_arr)), average='weighted')
+            
             print('[Training epoch {}/{}]: Loss = {}'.format(j, args.epochs, round(np.mean(av_loss), 3)))
             print('[Validation epoch {}] Loss: {} | f1 = {}'.format(j, round(np.mean(val_loss), 3), f1))
 
             writer.add_scalar('val/f1_score', f1, j)
-            # writer.add_scalar('evaluation/precision', p, j)
-            # writer.add_scalar('evaluation/recall', r, j)
             
             # IDEA: EARLY STOPPING
             if round(np.mean(val_loss), 3) >= round(last_val_loss, 3):
@@ -145,7 +141,7 @@ def DL_pipeline(x_train, y_train, x_val, y_val, args):
     return model
 
 
-def ML_pipeline(X_train, y_train, X_test, model, param_grid, cv=10, scoring_fit='f1', do_probabilities=False):
+def ML_pipeline(X_train, y_train, X_val, model, param_grid, cv=10, scoring_fit='f1', do_probabilities=False):
     '''
     Machine Learning pipeline of training-evaluation procedure
     '''
@@ -161,9 +157,9 @@ def ML_pipeline(X_train, y_train, X_test, model, param_grid, cv=10, scoring_fit=
     fitted_model = gs.fit(X_train, y_train)
 
     if do_probabilities:
-        pred = fitted_model.predict_proba(X_test)
+        pred = fitted_model.predict_proba(X_val)
     else:
-        pred = fitted_model.predict(X_test)
+        pred = fitted_model.predict(X_val)
 
     return fitted_model, pred
 
@@ -193,7 +189,7 @@ if __name__ == '__main__':
     main_path = '/Users/paulagomezduran/Desktop/EDREAMS/'
     X_train, y_train, X_val, y_val, X_test, df = preprocess_data(os.path.join(main_path, 'train.csv'),
                                                                  os.path.join(main_path, 'test.csv'), args,
-                                                                 test_size=0.2, balanceDATA=True)
+                                                                 test_size=0.2, balanceDATA=args.balanceDATA)
     if args.DL:
         # Scalers for normalizing features (based on training data and applied to all data)
         scaler = MinMaxScaler(feature_range=(0, 1))  
@@ -227,7 +223,7 @@ if __name__ == '__main__':
             print(model.best_score_)
             print(model.best_params_)
         else:
-            model = lgb.LGBMClassifier(learning_rate=0.05, max_depth=20, n_estimators=300, num_leaves=1000)
+            model = lgb.LGBMClassifier(learning_rate=0.05, max_depth=30, n_estimators=1000, num_leaves=2000)
             model.fit(X_train, y_train)
             y_pred = model.predict(X_val)
 

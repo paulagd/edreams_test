@@ -109,12 +109,12 @@ def evaluate(y_pred, y_true, prob_y_1):
 
     n_errors = len(np.where((y_pred == y_true) == False)[0])
     f1 = f1_score(y_true, y_pred)
+    roc = roc_auc_score(y_true, prob_y_1)
 
     print('Model Performance')
     print('-----------------------------')
     print('Error percentage: {:0.1f} %'.format((n_errors / len(y_pred)) * 100))
     print('F1 score = {:0.2f}%'.format(f1 * 100))
-    roc = roc_auc_score(y_true, prob_y_1)
     print('ROC_AUC = {:0.2f}%'.format(roc * 100))
     print('-----------------------------')
 
